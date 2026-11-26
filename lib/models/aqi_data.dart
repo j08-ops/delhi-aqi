@@ -27,15 +27,27 @@ class AqiData {
 
   factory AqiData.fromJson(Map<String, dynamic> json) {
     final data = json['data'];
-    if (data == null || data['aqi'] is! int) {
+    if (data is! Map<String, dynamic>) {
       throw const FormatException('Invalid AQI data structure');
+    }
+
+    final rawAqi = data['aqi'];
+    final int? parsedAqi = switch (rawAqi) {
+      int v => v,
+      num v => v.round(),
+      String s => int.tryParse(s),
+      _ => null,
+    };
+
+    if (parsedAqi == null) {
+      throw const FormatException('Station AQI reading is currently unavailable');
     }
 
     final iaqi = data['iaqi'] as Map<String, dynamic>? ?? {};
     final timeStr = data['time']?['s'] as String?;
 
     return AqiData(
-      aqi: data['aqi'] as int,
+      aqi: parsedAqi,
       dominantPollutant: data['dominentpol'] as String? ?? 'pm25',
       stationName: data['city']?['name'] as String? ?? 'Unknown Station',
       cityName: data['city']?['name'] as String? ?? 'Delhi',

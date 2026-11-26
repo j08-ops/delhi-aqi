@@ -46,6 +46,8 @@ app.*.map.json
 # Secrets — DO NOT COMMIT
 .env
 *.env
+.env.json
+*.env.json
 *.un~
 *.swp
 *.swo

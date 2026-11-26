@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import '../models/aqi_data.dart';
-import '../services/aqi_service.dart';
+import '../models/delhi_station.dart';
 import '../services/ai_advisor_service.dart';
+import '../services/aqi_service.dart';
 import '../widgets/aqi_display.dart';
 import '../widgets/pollutant_grid.dart';
+import '../widgets/profile_selector.dart';
 import 'route_compare_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -24,15 +26,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String _aiAdvice = '';
   bool _aiLoading = false;
 
-  String _selectedProfile = 'General adult';
-
-  static const List<String> _profiles = [
-    'General adult',
-    'Asthmatic',
-    'Child',
-    'Elderly',
-    'Outdoor runner',
-  ];
+  String _selectedProfile = userProfiles.first;
+  String _selectedStationId = DelhiStation.defaults.first.id;
 
   @override
   void initState() {
@@ -48,7 +43,19 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final data = await _aqiService.fetchByStationId('@9290');
+      final AqiData data;
+      if (_selectedStationId == 'city') {
+        data = await _aqiService.fetchDelhiCity();
+      } else {
+        final station = DelhiStation.defaults.firstWhere(
+          (s) => s.id == _selectedStationId,
+          orElse: () => DelhiStation.defaults.first,
+        );
+        data = station.waqiId != null
+            ? await _aqiService.fetchByStationId(station.waqiId!)
+            : await _aqiService.fetchByCoordinates(station.lat, station.lon);
+      }
+
       if (!mounted) return;
       setState(() {
         _data = data;
@@ -92,18 +99,18 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Delhi AQI'),
         centerTitle: true,
         actions: [
-           IconButton(
-             icon: const Icon(Icons.alt_route),
-             tooltip: 'Route Comparision',
-             onPressed: () {
-               Navigator.push(
-                 context,
-                 MaterialPageRoute(
-                   builder: (_) => const RouteCompareScreen(),
-                  ),
-                 );
-                },
-               ),
+          IconButton(
+            icon: const Icon(Icons.alt_route),
+            tooltip: 'Route Comparison',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const RouteCompareScreen(),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loading ? null : _loadData,
@@ -123,27 +130,44 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildStationSelector(theme),
+          const SizedBox(height: 32),
+          Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.cloud_off,
-                  size: 64, color: theme.colorScheme.error),
+              Icon(Icons.cloud_off, size: 64, color: theme.colorScheme.error),
               const SizedBox(height: 16),
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodyLarge),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyLarge,
+              ),
               const SizedBox(height: 24),
               FilledButton.icon(
                 onPressed: _loadData,
                 icon: const Icon(Icons.refresh),
                 label: const Text('Retry'),
               ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const RouteCompareScreen(),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.alt_route),
+                label: const Text('Open Route Comparison'),
+              ),
             ],
           ),
-        ),
+        ],
       );
     }
 
@@ -152,9 +176,17 @@ class _HomeScreenState extends State<HomeScreen> {
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
       children: [
+        _buildStationSelector(theme),
+        const SizedBox(height: 16),
         AqiDisplay(data: data),
         const SizedBox(height: 24),
-        _buildProfileSelector(theme),
+        ProfileSelector(
+          selectedProfile: _selectedProfile,
+          onSelected: (profile) {
+            setState(() => _selectedProfile = profile);
+            _fetchAiAdvice();
+          },
+        ),
         const SizedBox(height: 12),
         _buildAiAdviceCard(theme),
         const SizedBox(height: 24),
@@ -165,7 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildProfileSelector(ThemeData theme) {
+  Widget _buildStationSelector(ThemeData theme) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -174,28 +206,37 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Row(
               children: [
-                Icon(Icons.person, color: theme.colorScheme.primary),
+                Icon(Icons.location_on, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                Text('Your profile',
-                    style: theme.textTheme.titleMedium),
+                Text('Monitoring station', style: theme.textTheme.titleMedium),
               ],
             ),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
               runSpacing: 8,
-              children: _profiles.map((profile) {
-                final selected = profile == _selectedProfile;
-                return ChoiceChip(
-                  label: Text(profile),
-                  selected: selected,
+              children: [
+                ...DelhiStation.defaults.map((station) {
+                  return ChoiceChip(
+                    label: Text(station.name),
+                    selected: _selectedStationId == station.id,
+                    onSelected: (val) {
+                      if (!val || _selectedStationId == station.id) return;
+                      setState(() => _selectedStationId = station.id);
+                      _loadData();
+                    },
+                  );
+                }),
+                ChoiceChip(
+                  label: const Text('Delhi City'),
+                  selected: _selectedStationId == 'city',
                   onSelected: (val) {
-                    if (!val) return;
-                    setState(() => _selectedProfile = profile);
-                    _fetchAiAdvice();
+                    if (!val || _selectedStationId == 'city') return;
+                    setState(() => _selectedStationId = 'city');
+                    _loadData();
                   },
-                );
-              }).toList(),
+                ),
+              ],
             ),
           ],
         ),
@@ -212,11 +253,9 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Row(
               children: [
-                Icon(Icons.auto_awesome,
-                    color: theme.colorScheme.primary),
+                Icon(Icons.auto_awesome, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                Text('AI Health Advisor',
-                    style: theme.textTheme.titleMedium),
+                Text('AI Health Advisor', style: theme.textTheme.titleMedium),
               ],
             ),
             const SizedBox(height: 12),
@@ -253,7 +292,7 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Text(
         ts != null
             ? 'Last updated: ${ts.hour.toString().padLeft(2, '0')}:'
-            '${ts.minute.toString().padLeft(2, '0')} IST'
+                '${ts.minute.toString().padLeft(2, '0')} IST'
             : 'Data from WAQI network',
         style: theme.textTheme.bodySmall?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,

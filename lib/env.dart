@@ -1,12 +1,12 @@
-import 'package:envied/envied.dart';
+/// Compile-time environment configuration.
+///
+/// Pass secrets at build/run time using `--dart-define-from-file=.env.json`
+/// or `--dart-define=WAQI_TOKEN=... --dart-define=GEMINI_API_KEY=...`.
+/// Never commit `.env`, `.env.json`, or literal keys into source control.
+abstract final class Env {
+  static const String geminiApiKey = String.fromEnvironment('GEMINI_API_KEY');
+  static const String waqiToken = String.fromEnvironment('WAQI_TOKEN');
 
-part 'env.g.dart';
-
-@Envied(path: '.env', obfuscate: true)
-abstract class Env {
-  @EnviedField(varName: 'GEMINI_API_KEY')
-  static final String geminiApiKey = _Env.geminiApiKey;
-
-  @EnviedField(varName: 'WAQI_TOKEN')
-  static final String waqiToken = _Env.waqiToken;
+  static bool get hasGeminiKey => geminiApiKey.trim().isNotEmpty;
+  static bool get hasWaqiToken => waqiToken.trim().isNotEmpty;
 }

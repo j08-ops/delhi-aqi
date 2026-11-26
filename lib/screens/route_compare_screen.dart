@@ -1,10 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:latlong2/latlong.dart';
+import '../algorithms/intake_calculator.dart';
 import '../algorithms/route_comparator.dart';
+import '../models/delhi_station.dart';
 import '../models/route_result.dart';
+import '../services/aqi_service.dart';
 import '../widgets/aqi_map.dart';
+import '../widgets/profile_selector.dart';
 
-/// Demo screen that shows the algorithmic route comparison:
-/// fastest route vs cleanest route, evaluated with real Delhi station data.
+enum TrafficLevel {
+  freeFlow('Free-flow', 0.4),
+  moderate('Moderate', 0.85),
+  peak('Peak hour', 1.25);
+
+  final String label;
+  final double vcRatio;
+  const TrafficLevel(this.label, this.vcRatio);
+}
+
+/// Screen that compares the fastest route vs cleanest route across Delhi
+/// using spatial PM2.5 interpolation, BPR traffic delay, and user-profile
+/// breathing rates.
 class RouteCompareScreen extends StatefulWidget {
   const RouteCompareScreen({super.key});
 
@@ -13,45 +29,46 @@ class RouteCompareScreen extends StatefulWidget {
 }
 
 class _RouteCompareScreenState extends State<RouteCompareScreen> {
-  // Sample Delhi monitoring stations with realistic PM2.5 values.
-  // These coordinates are approximate locations of real stations.
-  final List<Map<String, dynamic>> _stations = [
-    {'name': 'DTU', 'lat': 28.7500, 'lon': 77.1167, 'pm25': 180.0},
-    {'name': 'ITO', 'lat': 28.6289, 'lon': 77.2410, 'pm25': 220.0},
-    {'name': 'Mandir Marg', 'lat': 28.6364, 'lon': 77.2010, 'pm25': 195.0},
-    {'name': 'RK Puram', 'lat': 28.5667, 'lon': 77.1833, 'pm25': 165.0},
-    {'name': 'Punjabi Bagh', 'lat': 28.6667, 'lon': 77.1333, 'pm25': 210.0},
-    {'name': 'Anand Vihar', 'lat': 28.6469, 'lon': 77.3160, 'pm25': 240.0},
-  ];
+  final _aqiService = AqiService();
 
-  String _selectedProfile = 'General adult';
-  static const List<String> _profiles = [
-    'General adult',
-    'Asthmatic',
-    'Child',
-    'Elderly',
-    'Outdoor runner',
-  ];
+  List<DelhiStation> _stations = DelhiStation.defaults;
+  bool _loadingStations = true;
+  bool _usingFallback = true;
+
+  String _selectedProfile = userProfiles.first;
+  TrafficLevel _trafficLevel = TrafficLevel.moderate;
 
   RouteResult? _fastest;
   RouteResult? _cleanest;
+  List<LatLng> _fastestPoints = const [];
+  List<LatLng> _cleanestPoints = const [];
 
   @override
   void initState() {
     super.initState();
     _computeRoutes();
+    _loadLiveStations();
+  }
+
+  Future<void> _loadLiveStations() async {
+    setState(() => _loadingStations = true);
+    final result = await _aqiService.fetchDelhiStations();
+    if (!mounted) return;
+    setState(() {
+      _stations = result.stations;
+      _usingFallback = result.usedFallback;
+      _loadingStations = false;
+    });
+    _computeRoutes();
   }
 
   void _computeRoutes() {
-    final comparator = RouteComparator(stations: _stations);
+    final stationMaps = _stations.map((s) => s.toInterpolationMap()).toList();
+    final comparator = RouteComparator(stations: stationMaps);
 
-    // Two sample routes through Delhi.
-    // The "fastest" route goes straight through the polluted center.
-    // The "cleanest" route detours through cleaner areas to the south.
-    final fastestSegments = _buildFastestRoute();
-    final cleanestSegments = _buildCleanestRoute();
-
-    final breathingRate = _getBreathingRate(_selectedProfile);
+    final fastestSegments = _applyTraffic(_buildFastestRoute(), comparator);
+    final cleanestSegments = _applyTraffic(_buildCleanestRoute(), comparator);
+    final breathingRate = IntakeCalculator.getBreathingRate(_selectedProfile);
 
     setState(() {
       _fastest = comparator.evaluateRoute(
@@ -64,48 +81,57 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
         routeType: 'cleanest',
         breathingRate: breathingRate,
       );
+      _fastestPoints = fastestSegments
+          .map((s) => LatLng(s['lat']!, s['lon']!))
+          .toList();
+      _cleanestPoints = cleanestSegments
+          .map((s) => LatLng(s['lat']!, s['lon']!))
+          .toList();
     });
   }
 
-  double _getBreathingRate(String profile) {
-    // Mirrors IntakeCalculator.getBreathingRate without importing it
-    // (keeps this screen self-contained).
-    switch (profile) {
-      case 'Asthmatic':
-        return 7.5 * 1.2;
-      case 'Child':
-        return 7.5 * 1.1;
-      case 'Elderly':
-        return 7.5 * 0.9;
-      case 'Outdoor runner':
-        return 22.5;
-      case 'General adult':
-      default:
-        return 7.5;
-    }
+  List<Map<String, double>> _applyTraffic(
+    List<Map<String, double>> baseSegments,
+    RouteComparator comparator,
+  ) {
+    const double roadCapacity = 1000.0;
+    return baseSegments.map((seg) {
+      final trafficFactor = seg['congestion'] ?? 1.0;
+      final adjustedDuration = comparator.estimateSegmentTime(
+        freeFlowMinutes: seg['duration']!,
+        volume: roadCapacity * _trafficLevel.vcRatio * trafficFactor,
+        capacity: roadCapacity,
+      );
+      return {
+        'lat': seg['lat']!,
+        'lon': seg['lon']!,
+        'duration': adjustedDuration,
+        'distance': seg['distance']!,
+      };
+    }).toList();
   }
 
-  /// Fastest route: goes directly through central Delhi (high pollution).
+  /// Fastest route: goes directly through central Delhi (higher congestion).
   List<Map<String, double>> _buildFastestRoute() {
     return [
-      {'lat': 28.7500, 'lon': 77.1167, 'duration': 5.0, 'distance': 2.0}, // DTU
-      {'lat': 28.6900, 'lon': 77.1500, 'duration': 8.0, 'distance': 4.5}, // North Delhi
-      {'lat': 28.6667, 'lon': 77.1333, 'duration': 6.0, 'distance': 3.0}, // Punjabi Bagh
-      {'lat': 28.6364, 'lon': 77.2010, 'duration': 12.0, 'distance': 6.0}, // Mandir Marg
-      {'lat': 28.6289, 'lon': 77.2410, 'duration': 10.0, 'distance': 5.0}, // ITO
-      {'lat': 28.6000, 'lon': 77.2800, 'duration': 7.0, 'distance': 3.5}, // East Delhi
+      {'lat': 28.7500, 'lon': 77.1167, 'duration': 5.0, 'distance': 2.0, 'congestion': 0.9},
+      {'lat': 28.6900, 'lon': 77.1500, 'duration': 8.0, 'distance': 4.5, 'congestion': 1.0},
+      {'lat': 28.6667, 'lon': 77.1333, 'duration': 6.0, 'distance': 3.0, 'congestion': 1.1},
+      {'lat': 28.6364, 'lon': 77.2010, 'duration': 12.0, 'distance': 6.0, 'congestion': 1.15},
+      {'lat': 28.6289, 'lon': 77.2410, 'duration': 10.0, 'distance': 5.0, 'congestion': 1.2},
+      {'lat': 28.6000, 'lon': 77.2800, 'duration': 7.0, 'distance': 3.5, 'congestion': 1.0},
     ];
   }
 
   /// Cleanest route: longer detour through southern Delhi (lower pollution).
   List<Map<String, double>> _buildCleanestRoute() {
     return [
-      {'lat': 28.7500, 'lon': 77.1167, 'duration': 5.0, 'distance': 2.0}, // DTU
-      {'lat': 28.6900, 'lon': 77.1300, 'duration': 10.0, 'distance': 5.0}, // Detour west
-      {'lat': 28.6200, 'lon': 77.1200, 'duration': 12.0, 'distance': 6.0}, // West Delhi
-      {'lat': 28.5667, 'lon': 77.1833, 'duration': 9.0, 'distance': 4.5}, // RK Puram (cleaner)
-      {'lat': 28.5900, 'lon': 77.2400, 'duration': 8.0, 'distance': 4.0}, // South Delhi
-      {'lat': 28.6000, 'lon': 77.2800, 'duration': 5.0, 'distance': 2.5}, // East Delhi
+      {'lat': 28.7500, 'lon': 77.1167, 'duration': 5.0, 'distance': 2.0, 'congestion': 0.9},
+      {'lat': 28.6900, 'lon': 77.1300, 'duration': 10.0, 'distance': 5.0, 'congestion': 0.95},
+      {'lat': 28.6200, 'lon': 77.1200, 'duration': 12.0, 'distance': 6.0, 'congestion': 0.9},
+      {'lat': 28.5667, 'lon': 77.1833, 'duration': 9.0, 'distance': 4.5, 'congestion': 0.85},
+      {'lat': 28.5900, 'lon': 77.2400, 'duration': 8.0, 'distance': 4.0, 'congestion': 0.9},
+      {'lat': 28.6000, 'lon': 77.2800, 'duration': 5.0, 'distance': 2.5, 'congestion': 0.95},
     ];
   }
 
@@ -117,17 +143,38 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
       appBar: AppBar(
         title: const Text('Route Comparison'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh station readings',
+            onPressed: _loadingStations ? null : _loadLiveStations,
+          ),
+        ],
       ),
       body: _fastest == null || _cleanest == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                _buildProfileSelector(theme),
+                _buildDataSourceStatus(theme),
+                const SizedBox(height: 12),
+                ProfileSelector(
+                  selectedProfile: _selectedProfile,
+                  onSelected: (profile) {
+                    setState(() => _selectedProfile = profile);
+                    _computeRoutes();
+                  },
+                ),
+                const SizedBox(height: 12),
+                _buildTrafficSelector(theme),
                 const SizedBox(height: 16),
                 _buildComparisonBanner(theme),
                 const SizedBox(height: 16),
-                const AqiMap(),
+                AqiMap(
+                  stations: _stations,
+                  fastestRoute: _fastestPoints,
+                  cleanestRoute: _cleanestPoints,
+                ),
                 const SizedBox(height: 16),
                 _buildRouteCard(
                   theme,
@@ -151,7 +198,37 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
     );
   }
 
-  Widget _buildProfileSelector(ThemeData theme) {
+  Widget _buildDataSourceStatus(ThemeData theme) {
+    final IconData icon;
+    final String label;
+    if (_loadingStations) {
+      icon = Icons.sync;
+      label = 'Fetching live WAQI station readings...';
+    } else if (_usingFallback) {
+      icon = Icons.offline_bolt;
+      label = 'Using sample Delhi PM2.5 readings (live WAQI unavailable)';
+    } else {
+      icon = Icons.cloud_done;
+      label = 'Using live WAQI PM2.5 readings across ${_stations.length} stations';
+    }
+
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: theme.colorScheme.primary),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTrafficSelector(ThemeData theme) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -160,22 +237,22 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
           children: [
             Row(
               children: [
-                Icon(Icons.person, color: theme.colorScheme.primary),
+                Icon(Icons.traffic, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                Text('Your profile', style: theme.textTheme.titleMedium),
+                Text('Traffic conditions', style: theme.textTheme.titleMedium),
               ],
             ),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
               runSpacing: 8,
-              children: _profiles.map((profile) {
+              children: TrafficLevel.values.map((level) {
                 return ChoiceChip(
-                  label: Text(profile),
-                  selected: profile == _selectedProfile,
+                  label: Text(level.label),
+                  selected: level == _trafficLevel,
                   onSelected: (val) {
                     if (!val) return;
-                    setState(() => _selectedProfile = profile);
+                    setState(() => _trafficLevel = level);
                     _computeRoutes();
                   },
                 );
@@ -188,15 +265,6 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
   }
 
   Widget _buildComparisonBanner(ThemeData theme) {
-    final fastest = _fastest!;
-    final cleanest = _cleanest!;
-    final timeDiff =
-        cleanest.travelTimeMinutes - fastest.travelTimeMinutes;
-    final intakeDiff = fastest.totalIntakeUg - cleanest.totalIntakeUg;
-    final percentReduction = fastest.totalIntakeUg > 0
-        ? (intakeDiff / fastest.totalIntakeUg * 100)
-        : 0.0;
-
     return Card(
       color: theme.colorScheme.primaryContainer,
       child: Padding(
@@ -206,8 +274,10 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
           children: [
             Row(
               children: [
-                Icon(Icons.insights,
-                    color: theme.colorScheme.onPrimaryContainer),
+                Icon(
+                  Icons.insights,
+                  color: theme.colorScheme.onPrimaryContainer,
+                ),
                 const SizedBox(width: 8),
                 Text(
                   'The trade-off',
@@ -220,8 +290,7 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'The clean route takes ${timeDiff.toStringAsFixed(1)} more minutes '
-              'but cuts PM2.5 intake by ${percentReduction.toStringAsFixed(0)}%.',
+              RouteResult.compare(_fastest!, _cleanest!),
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onPrimaryContainer,
               ),
@@ -356,19 +425,26 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
               children: [
                 Icon(Icons.science, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                Text('How this works',
-                    style: theme.textTheme.titleMedium),
+                Text('How this works', style: theme.textTheme.titleMedium),
               ],
             ),
             const SizedBox(height: 12),
-            _bullet(theme,
-                'PM2.5 at each point is estimated using Inverse Distance Weighting from 6 Delhi stations.'),
-            _bullet(theme,
-                'Intake = concentration × time × breathing rate, converted to cigarette equivalents.'),
-            _bullet(theme,
-                'The fastest route minimizes time. The cleanest route minimizes PM2.5 intake.'),
-            _bullet(theme,
-                'Change your profile to see how breathing rate affects the trade-off.'),
+            _bullet(
+              theme,
+              'PM2.5 at each point is estimated using Inverse Distance Weighting from ${_stations.length} Delhi stations.',
+            ),
+            _bullet(
+              theme,
+              'Segment travel times scale with traffic congestion using the Bureau of Public Roads (BPR) formula.',
+            ),
+            _bullet(
+              theme,
+              'Intake = concentration × time × breathing rate, converted to cigarette equivalents.',
+            ),
+            _bullet(
+              theme,
+              'Change your profile or traffic conditions to see how exposure and travel time shift.',
+            ),
           ],
         ),
       ),
@@ -383,8 +459,11 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.only(top: 6),
-            child: Icon(Icons.circle,
-                size: 6, color: theme.colorScheme.primary),
+            child: Icon(
+              Icons.circle,
+              size: 6,
+              color: theme.colorScheme.primary,
+            ),
           ),
           const SizedBox(width: 8),
           Expanded(

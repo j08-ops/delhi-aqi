@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/aqi_data.dart';
+import '../utils/aqi_colors.dart';
 
 class AqiDisplay extends StatelessWidget {
   final AqiData data;
@@ -8,7 +9,7 @@ class AqiDisplay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = _aqiColor(data.aqi);
+    final color = aqiColor(data.aqi);
     final category = AqiData.getCategory(data.aqi);
 
     return Card(
@@ -55,14 +56,5 @@ class AqiDisplay extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  Color _aqiColor(int aqi) {
-    if (aqi <= 50) return const Color(0xFF00E400);
-    if (aqi <= 100) return const Color(0xFFFFFF00);
-    if (aqi <= 150) return const Color(0xFFFF7E00);
-    if (aqi <= 200) return const Color(0xFFFF0000);
-    if (aqi <= 300) return const Color(0xFF8F3F97);
-    return const Color(0xFF7E0023);
   }
 }

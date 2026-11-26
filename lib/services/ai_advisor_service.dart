@@ -1,29 +1,27 @@
 import 'package:google_generative_ai/google_generative_ai.dart';
+import '../env.dart';
 import '../models/aqi_data.dart';
 
 class AiAdvisorService {
-  /// Get your free API key from https://aistudio.google.com/apikey
-  /// Replace this placeholder with your actual key.
-  static const String _apiKey = 'YOUR_GEMINI_API_KEY';
+  static const String _defaultModel = 'gemini-2.5-flash';
 
   Future<String> getHealthAdvice({
     required AqiData data,
     required String userProfile,
   }) async {
-    if (_apiKey == 'YOUR_GEMINI_API_KEY') {
-      // Fallback when no key is configured
+    if (!Env.hasGeminiKey) {
       return '${AqiData.getHealthAdvice(data.aqi)}\n\n'
-          '(AI advice unavailable — API key not configured. '
-          'Set your Gemini key in ai_advisor_service.dart.)';
+          '(AI advice unavailable — pass GEMINI_API_KEY via '
+          '--dart-define-from-file=.env.json to enable Gemini insights.)';
     }
 
     final model = GenerativeModel(
-      model: 'gemini-1.5-flash-latest',
-      apiKey: _apiKey,
+      model: _defaultModel,
+      apiKey: Env.geminiApiKey,
       systemInstruction: Content.system(
         'You are a concise air quality health advisor for Delhi. '
-            'Give actionable, personalized advice in under 3 sentences. '
-            'Consider the user profile carefully.',
+        'Give actionable, personalized advice in under 3 sentences. '
+        'Consider the user profile carefully.',
       ),
     );
 
@@ -40,10 +38,10 @@ What should this person do right now?
 
     try {
       final response = await model.generateContent([Content.text(prompt)]);
-      return response.text ?? 'No advice available.';
+      return response.text ?? AqiData.getHealthAdvice(data.aqi);
     } catch (e) {
       return '${AqiData.getHealthAdvice(data.aqi)}\n\n'
-          '(AI unavailable: $e)';
+          '(AI advisor fallback — request failed: $e)';
     }
   }
 }
