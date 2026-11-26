@@ -227,9 +227,11 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
 
     for (var i = 0; i < _candidates.length; i++) {
       final candidate = _candidates[i];
-      // Slight congestion gradient across alternatives so peak-hour BPR
-      // captures heavier central-corridor delays on the primary route.
-      final routeCongestionFactor = i == 0 ? 1.05 : 0.92;
+      // Primary OSRM arterial routes experience higher peak congestion than
+      // secondary clean-air detour corridors.
+      final routeCongestionFactor = candidate.isDetourProbe
+          ? 0.85
+          : (i == 0 ? 1.15 : 0.95);
       final adjustedSegments = candidate.segments.map((seg) {
         final adjustedDuration = comparator.estimateSegmentTime(
           freeFlowMinutes: seg['duration']!,
@@ -789,6 +791,14 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
                 Expanded(
                   child: _buildStat(
                     theme,
+                    label: 'Avg PM2.5',
+                    value: '${_avgPm25(result).toStringAsFixed(0)} µg/m³',
+                    icon: Icons.blur_on,
+                  ),
+                ),
+                Expanded(
+                  child: _buildStat(
+                    theme,
                     label: 'Equivalent',
                     value:
                         '${result.cigaretteEquivalent.toStringAsFixed(2)} cigs',
@@ -801,6 +811,14 @@ class _RouteCompareScreenState extends State<RouteCompareScreen> {
         ),
       ),
     );
+  }
+
+  double _avgPm25(RouteResult result) {
+    final breathingRate = IntakeCalculator.getBreathingRate(_selectedProfile);
+    if (result.travelTimeMinutes <= 0 || breathingRate <= 0) return 0.0;
+    return result.totalIntakeUg *
+        1000.0 /
+        (breathingRate * result.travelTimeMinutes);
   }
 
   Widget _buildStat(

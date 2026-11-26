@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import '../algorithms/aqi_interpolation.dart';
@@ -25,12 +26,14 @@ class RouteCandidate {
   final List<Map<String, double>> segments;
   final double durationMinutes;
   final double distanceKm;
+  final bool isDetourProbe;
 
   const RouteCandidate({
     required this.points,
     required this.segments,
     required this.durationMinutes,
     required this.distanceKm,
+    this.isDetourProbe = false,
   });
 }
 
@@ -46,9 +49,12 @@ class RoutingServiceException implements Exception {
 /// anywhere-to-anywhere route comparison.
 class RoutingService {
   static const Duration _timeout = Duration(seconds: 12);
-  static const Map<String, String> _headers = {
+  static const Map<String, String> _nativeHeaders = {
     'User-Agent': 'delhi_aqi/1.0 (https://github.com/j08-ops/delhi-aqi)',
   };
+
+  Map<String, String> get _headers =>
+      kIsWeb ? const <String, String>{} : _nativeHeaders;
 
   /// Search places anywhere in the world using OpenStreetMap Nominatim.
   Future<List<PlaceSuggestion>> searchPlaces(String query) async {
@@ -96,8 +102,9 @@ class RoutingService {
   }
 
   /// Fetch real road route candidates between [origin] and [destination]
-  /// via OSRM, plus an AQI-aware via-waypoint detour if fewer than 2 distinct
-  /// routes are returned.
+  /// via OSRM, and always probe AQI-aware clean-air detour waypoints when
+  /// [stations] are provided so alternative lower-pollution corridors are
+  /// evaluated alongside the fastest corridor.
   Future<List<RouteCandidate>> fetchRoutes({
     required LatLng origin,
     required LatLng destination,
@@ -110,39 +117,44 @@ class RoutingService {
       '?alternatives=3&geometries=geojson&overview=full',
     );
 
-    final candidates = await _queryOsrm(primaryUrl);
-    if (candidates.isEmpty) {
+    final detourWaypoints = stations.isEmpty
+        ? const <LatLng>[]
+        : pickCleanWaypoints(origin, destination, stations);
+
+    final primaryFuture = _queryOsrm(primaryUrl, isDetourProbe: false);
+    final detourFutures = detourWaypoints.map((via) {
+      final detourUrl = Uri.parse(
+        'https://router.project-osrm.org/route/v1/driving/'
+        '${origin.longitude},${origin.latitude};'
+        '${via.longitude},${via.latitude};'
+        '${destination.longitude},${destination.latitude}'
+        '?geometries=geojson&overview=full',
+      );
+      return _queryOsrm(detourUrl, isDetourProbe: true).catchError(
+        (_) => const <RouteCandidate>[],
+      );
+    }).toList();
+
+    final primaryCandidates = await primaryFuture;
+    if (primaryCandidates.isEmpty) {
       throw const RoutingServiceException(
         'No driving route found between these locations.',
       );
     }
 
-    // If OSRM returned fewer than 2 routes and we have station PM2.5 data,
-    // probe a clean-air perpendicular detour waypoint to try finding a
-    // lower-exposure alternative corridor.
-    if (candidates.length < 2 && stations.isNotEmpty) {
-      final detour = _pickCleanerWaypoint(origin, destination, stations);
-      if (detour != null) {
-        final detourUrl = Uri.parse(
-          'https://router.project-osrm.org/route/v1/driving/'
-          '${origin.longitude},${origin.latitude};'
-          '${detour.longitude},${detour.latitude};'
-          '${destination.longitude},${destination.latitude}'
-          '?geometries=geojson&overview=full',
-        );
-        try {
-          final detourRoutes = await _queryOsrm(detourUrl);
-          candidates.addAll(detourRoutes);
-        } catch (_) {
-          // Non-fatal: proceed with primary route(s).
-        }
-      }
+    final detourResults = await Future.wait(detourFutures);
+    final all = <RouteCandidate>[...primaryCandidates];
+    for (final list in detourResults) {
+      all.addAll(list);
     }
 
-    return candidates;
+    return deduplicateRoutes(all);
   }
 
-  Future<List<RouteCandidate>> _queryOsrm(Uri url) async {
+  Future<List<RouteCandidate>> _queryOsrm(
+    Uri url, {
+    required bool isDetourProbe,
+  }) async {
     try {
       final response =
           await http.get(url, headers: _headers).timeout(_timeout);
@@ -162,7 +174,8 @@ class RoutingService {
       final candidates = <RouteCandidate>[];
       for (final rawRoute in json['routes'] as List) {
         if (rawRoute is! Map<String, dynamic>) continue;
-        final candidate = parseOsrmRoute(rawRoute);
+        final candidate =
+            parseOsrmRoute(rawRoute, isDetourProbe: isDetourProbe);
         if (candidate != null) candidates.add(candidate);
       }
       return candidates;
@@ -174,7 +187,10 @@ class RoutingService {
   }
 
   /// Parse a single OSRM route GeoJSON object into a [RouteCandidate].
-  static RouteCandidate? parseOsrmRoute(Map<String, dynamic> routeJson) {
+  static RouteCandidate? parseOsrmRoute(
+    Map<String, dynamic> routeJson, {
+    bool isDetourProbe = false,
+  }) {
     final durationSec = (routeJson['duration'] as num?)?.toDouble();
     final distanceMeters = (routeJson['distance'] as num?)?.toDouble();
     final geometry = routeJson['geometry'] as Map<String, dynamic>?;
@@ -212,6 +228,7 @@ class RoutingService {
       segments: segments,
       durationMinutes: totalDurationMin,
       distanceKm: totalDistanceKm,
+      isDetourProbe: isDetourProbe,
     );
   }
 
@@ -226,7 +243,6 @@ class RoutingService {
   }) {
     if (points.length < 2) return const [];
 
-    // Downsample very dense polylines while keeping start and end intact.
     final sampled = <LatLng>[];
     if (points.length <= maxSamples) {
       sampled.addAll(points);
@@ -263,25 +279,29 @@ class RoutingService {
     return segments;
   }
 
-  static LatLng? _pickCleanerWaypoint(
+  /// Select up to two candidate detour waypoints biased toward cleaner air:
+  /// 1) The cleaner perpendicular corridor offset around the trip midpoint.
+  /// 2) The lowest-PM2.5 monitoring station within a reasonable detour factor.
+  static List<LatLng> pickCleanWaypoints(
     LatLng origin,
     LatLng destination,
     List<DelhiStation> stations,
   ) {
+    final directKm = _haversineKm(origin, destination);
+    if (directKm < 1.0 || stations.isEmpty) return const [];
+
+    final waypoints = <LatLng>[];
+
+    // 1. Perpendicular offset (~28% of span) toward the lower-PM2.5 side.
     final midLat = (origin.latitude + destination.latitude) / 2.0;
     final midLon = (origin.longitude + destination.longitude) / 2.0;
     final dLat = destination.latitude - origin.latitude;
     final dLon = destination.longitude - origin.longitude;
-    final span = sqrt(dLat * dLat + dLon * dLon);
-    if (span < 0.005) return null; // Too short (~500m) for meaningful detour
 
-    // Perpendicular offset ~18% of span on each side of the midpoint.
-    const offsetScale = 0.18;
-    final perpLat = -dLon * offsetScale;
-    final perpLon = dLat * offsetScale;
-
-    final left = LatLng(midLat + perpLat, midLon + perpLon);
-    final right = LatLng(midLat - perpLat, midLon - perpLon);
+    const offsetScale = 0.28;
+    final left = LatLng(midLat - dLon * offsetScale, midLon + dLat * offsetScale);
+    final right =
+        LatLng(midLat + dLon * offsetScale, midLon - dLat * offsetScale);
 
     final interp = AqiInterpolation(
       stations.map((s) => s.toInterpolationMap()).toList(),
@@ -289,8 +309,48 @@ class RoutingService {
     final leftPm = interp.interpolate(lat: left.latitude, lon: left.longitude);
     final rightPm =
         interp.interpolate(lat: right.latitude, lon: right.longitude);
+    waypoints.add(leftPm <= rightPm ? left : right);
 
-    return leftPm <= rightPm ? left : right;
+    // 2. Cleanest monitoring station within a reasonable detour budget.
+    DelhiStation? bestStation;
+    for (final station in stations) {
+      final sPoint = LatLng(station.lat, station.lon);
+      final fromOrigin = _haversineKm(origin, sPoint);
+      final toDest = _haversineKm(sPoint, destination);
+      if (fromOrigin < 0.8 || toDest < 0.8) continue;
+      if (fromOrigin + toDest > directKm * 1.65) continue;
+
+      if (bestStation == null || station.pm25 < bestStation.pm25) {
+        bestStation = station;
+      }
+    }
+    if (bestStation != null) {
+      final stationPoint = LatLng(bestStation.lat, bestStation.lon);
+      if (_haversineKm(stationPoint, waypoints.first) > 1.0) {
+        waypoints.add(stationPoint);
+      }
+    }
+
+    return waypoints;
+  }
+
+  /// Remove duplicate routes that follow virtually the same corridor.
+  static List<RouteCandidate> deduplicateRoutes(List<RouteCandidate> routes) {
+    final unique = <RouteCandidate>[];
+    for (final route in routes) {
+      final mid = route.points[route.points.length ~/ 2];
+      final isDuplicate = unique.any((existing) {
+        final existingMid = existing.points[existing.points.length ~/ 2];
+        final sameDistance =
+            (existing.distanceKm - route.distanceKm).abs() < 0.3;
+        final sameDuration =
+            (existing.durationMinutes - route.durationMinutes).abs() < 0.5;
+        final closeMidpoint = _haversineKm(existingMid, mid) < 0.4;
+        return sameDistance && sameDuration && closeMidpoint;
+      });
+      if (!isDuplicate) unique.add(route);
+    }
+    return unique;
   }
 
   static double _haversineKm(LatLng a, LatLng b) {
