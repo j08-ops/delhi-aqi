@@ -87,12 +87,12 @@ class AqiService {
     try {
       final response = await http.get(url).timeout(_timeout);
       if (response.statusCode != 200) {
-        return fetchDelhiStations();
+        return await fetchDelhiStations();
       }
 
       final json = jsonDecode(response.body) as Map<String, dynamic>;
       if (json['status'] != 'ok' || json['data'] is! List) {
-        return fetchDelhiStations();
+        return await fetchDelhiStations();
       }
 
       final stations = <DelhiStation>[];
