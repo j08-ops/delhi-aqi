@@ -78,6 +78,27 @@ class AqiData {
     return 'Hazardous';
   }
 
+  /// Approximate PM2.5 concentration (µg/m³) from US-EPA AQI using piecewise
+  /// linear breakpoints. Useful when a station feed only reports composite AQI.
+  static double aqiToPm25(int aqi) {
+    final clamped = aqi.clamp(0, 500);
+    const breakpoints = <(int iLow, int iHigh, double cLow, double cHigh)>[
+      (0, 50, 0.0, 12.0),
+      (51, 100, 12.1, 35.4),
+      (101, 150, 35.5, 55.4),
+      (151, 200, 55.5, 150.4),
+      (201, 300, 150.5, 250.4),
+      (301, 500, 250.5, 500.4),
+    ];
+
+    for (final (iLow, iHigh, cLow, cHigh) in breakpoints) {
+      if (clamped <= iHigh) {
+        return ((clamped - iLow) / (iHigh - iLow)) * (cHigh - cLow) + cLow;
+      }
+    }
+    return 500.4;
+  }
+
   static String getHealthAdvice(int aqi) {
     if (aqi <= 50) return 'Air quality is satisfactory. Enjoy outdoor activities.';
     if (aqi <= 100) {

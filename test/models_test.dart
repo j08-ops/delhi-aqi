@@ -46,6 +46,14 @@ void main() {
       expect(AqiData.getCategory(260), 'Very Unhealthy');
       expect(AqiData.getCategory(350), 'Hazardous');
     });
+
+    test('converts composite AQI to approximate PM2.5 monotonically', () {
+      expect(AqiData.aqiToPm25(0), 0.0);
+      expect(AqiData.aqiToPm25(50), closeTo(12.0, 0.01));
+      expect(AqiData.aqiToPm25(100), closeTo(35.4, 0.01));
+      expect(AqiData.aqiToPm25(200), closeTo(150.4, 0.01));
+      expect(AqiData.aqiToPm25(300), closeTo(250.4, 0.01));
+    });
   });
 
   group('RouteResult', () {

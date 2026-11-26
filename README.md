@@ -6,11 +6,14 @@ A Flutter application for monitoring real-time Delhi Air Quality Index (AQI), ge
 
 - **Live Delhi Station AQI**: Switch between Delhi monitoring stations (DTU, ITO, Mandir Marg, RK Puram, Punjabi Bagh, Anand Vihar) or Delhi City overall via the WAQI API.
 - **Personalized Health Advisor**: Profile-aware advice (`General adult`, `Asthmatic`, `Child`, `Elderly`, `Outdoor runner`) powered by Gemini with automatic deterministic fallback when offline or unconfigured.
-- **Fastest vs. Cleanest Route Comparison**:
+- **Fastest vs. Cleanest Route Comparison (Anywhere-to-Anywhere)**:
+  - Search any origin and destination via OpenStreetMap Nominatim (`lib/services/routing_service.dart`) or tap directly on the map to place pins.
+  - Real road route alternatives via OSRM, plus AQI-aware via-waypoint detour probing when only one corridor is returned.
+  - Regional monitoring stations fetched dynamically for the route bounding box via WAQI (`/map/bounds`), with graceful baseline fallback when offline.
   - Spatial PM2.5 estimation via Inverse Distance Weighting (`lib/algorithms/aqi_interpolation.dart`).
   - Traffic-adjusted segment travel times via the Bureau of Public Roads (BPR) model (`lib/algorithms/travel_time.dart`).
   - Profile-adjusted PM2.5 inhalation intake and cigarette equivalents (`lib/algorithms/intake_calculator.dart`).
-  - Interactive OpenStreetMap view (`lib/widgets/aqi_map.dart`) displaying stations and route polylines.
+  - Interactive OpenStreetMap view (`lib/widgets/aqi_map.dart`) displaying endpoints, stations, and route polylines.
 
 ## Setup & Running Locally
 
